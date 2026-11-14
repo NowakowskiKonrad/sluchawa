@@ -12,7 +12,7 @@ After collecting all the audio required and getting stop command it should add p
 
 
 class DiscordAudioInputAdapter:
-    def __init__(self, domain_port: AudioInputPort, voice_client: discord.VoiceClient):
+    def __init__(self, domain_port: AudioInputPort, voice_client: discord.voice.VoiceClient):
         self._domain_port = domain_port
         self._voice_client = voice_client
         self.session_id = str(uuid.uuid4())
