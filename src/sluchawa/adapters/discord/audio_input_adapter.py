@@ -18,6 +18,7 @@ class DiscordAudioInputAdapter:
         self.session_id = str(uuid.uuid4())
         self._output_dir = Path(f"/tmp/sluchawa_records/{self.session_id}")
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._sink: discord.sinks.OGGSink | None = None
 
     def start_recording(self) -> None:
         self._sink = discord.sinks.OGGSink()
