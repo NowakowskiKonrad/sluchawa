@@ -32,7 +32,7 @@ class DiscordAudioInputAdapter:
         saved_paths: list[Path] = []
 
         for user_id, audio in sink.audio_data.items():
-            file_path = self._output_dir / f"{user_id}.ogg"
+            file_path = self._output_dir / f"{uuid}_{user_id}.ogg"
             with open(file_path, "wb") as f:
                 f.write(audio.file.read())
 
