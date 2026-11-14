@@ -1,6 +1,6 @@
 import uuid
 from pathlib import Path
-import Discord
+import discord
 
 from sluchawa.ports.audio_input_port import AudioInputPort
 
