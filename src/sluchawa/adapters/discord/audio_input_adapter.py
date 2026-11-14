@@ -21,7 +21,7 @@ class DiscordAudioInputAdapter:
 
     def start_recording(self) -> None:
         self._voice_client.start_recording(
-            discord.sinks.OggSink(),
+            discord.sinks.OGGSink(),
             self.add_audio_to_queue
         )
 
