@@ -20,18 +20,22 @@ class DiscordAudioInputAdapter:
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
     def start_recording(self) -> None:
+        self._sink = discord.sinks.OGGSink()
         self._voice_client.start_recording(
-            discord.sinks.OGGSink(),
+            self._sink,
             self.add_audio_to_queue
         )
 
     def stop_recording(self) -> None:
         self._voice_client.stop_recording()
 
-    def add_audio_to_queue(self, sink: discord.sinks.Sink) -> None:
+    def add_audio_to_queue(self, error: Exception | None) -> None:
+        if error:
+            print(f"There is error while recording {error}")
+
         saved_paths: list[Path] = []
 
-        for user_id, audio in sink.audio_data.items():
+        for user_id, audio in self._sink.audio_data.items():
             file_path = self._output_dir / f"{uuid}_{user_id}.ogg"
             with open(file_path, "wb") as f:
                 f.write(audio.file.read())
