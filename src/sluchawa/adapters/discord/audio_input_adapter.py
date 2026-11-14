@@ -28,7 +28,7 @@ class DiscordAudioInputAdapter:
     def stop_recording(self) -> None:
         self._voice_client.stop_recording()
 
-    async def add_audio_to_queue(self, sink: discord.sinks.Sink) -> None:
+    def add_audio_to_queue(self, sink: discord.sinks.Sink) -> None:
         saved_paths: list[Path] = []
 
         for user_id, audio in sink.audio_data.items():
