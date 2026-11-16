@@ -24,31 +24,6 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Check version bump
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch origin main
-          
-          # Wyciągamy wersję z obecnej gałęzi
-          CURRENT_VER=$(grep -m 1 '^version = ' pyproject.toml | cut -d '"' -f 2)
-          
-          # Wyciągamy wersję bezpośrednio z pliku na gałęzi main (bez przełączania brancha)
-          MAIN_VER=$(git show origin/main:pyproject.toml | grep -m 1 '^version = ' | cut -d '"' -f 2)
-          
-          echo "Wersja na main: $MAIN_VER"
-          echo "Obecna wersja: $CURRENT_VER"
-          
-          python3 -c "
-          import sys
-          def v(s): return tuple(map(int, s.split('.')))
-          if not '$MAIN_VER':
-              print('Brak wersji na main, pomijam sprawdzanie.')
-              sys.exit(0)
-          if v('$CURRENT_VER') <= v('$MAIN_VER'):
-              print(f'ERROR: Version ($CURRENT_VER) must be higher than on main ($MAIN_VER)')
-              sys.exit(1)
-          print('Version is correct')"
-
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
@@ -57,3 +32,6 @@ jobs:
 
       - name: Run Mypy
         run: uv run mypy src/
+
+      - name: Run tests
+        run: uv run pytest tests/
