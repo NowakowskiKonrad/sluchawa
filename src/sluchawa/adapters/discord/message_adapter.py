@@ -1,5 +1,6 @@
-from loguru import logger
 import httpx
+from loguru import logger
+
 
 class DiscordMessageAdapter:
     def __init__(self, token: str, channel_id: str | int):
