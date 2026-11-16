@@ -1,9 +1,10 @@
 import uuid
 from pathlib import Path
-import discord
-from discord.voice import VoiceClient
+
 from loguru import logger
 
+import discord
+from discord.voice import VoiceClient
 from sluchawa.ports.audio_input_port import AudioInputPort
 
 """
