@@ -1,18 +1,34 @@
 import tempfile
 import threading
+import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import soundcard as sc
 import soundfile as sf
-
 from loguru import logger
 
 from sluchawa.ports.audio_input_port import AudioInputPort
 
 TRACKS = ("mic", "system")
 RATE = 16_000
+STOP_TIMEOUT = 2.0
+BLOCK_SIZE = 1024
+
+
+@dataclass
+class _Recording:
+    """State owned by exactly one recording session."""
+
+    output_dir: Path
+    stop: threading.Event = field(default_factory=threading.Event)
+    chunks: dict[str, list[np.ndarray]] = field(
+        default_factory=lambda: {key: [] for key in TRACKS}
+    )
+    errors: list[Exception] = field(default_factory=list)
+    threads: list[threading.Thread] = field(default_factory=list)
 
 class LocalAudioInputAdapter:
     def __init__(self, domain_port: AudioInputPort, mic_name: str | None = None, speaker_name: str | None = None):
@@ -21,66 +37,76 @@ class LocalAudioInputAdapter:
         self._mic_name: str | None = mic_name
 
         self.session_id: str | None = None
-        self._output_dir: Path | None = None
-        self._stop = threading.Event()
-        self._chunks: dict[str, list[np.ndarray]] = {}
-        self._errors: list[Exception] = []
-        self._threads: list[threading.Thread] = []
+        self._recording: _Recording | None = None
 
 
-    def start_recording(self):
-        if self._threads:
+    def start_recording(self) -> None:
+        if self._recording is not None:
             logger.error("Only one local recording can be run at the same time.")
             return
-        self.session_id = str(uuid.uuid4())
-        self._output_dir = Path(f"{tempfile.gettempdir()}/sluchawa_records/{self.session_id}")
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._stop.clear()
-        self._chunks = { key: [] for key in TRACKS}
-        self._errors = []
 
         sources = {
             "mic": self._resolve_mic(),
-            "system": self._resolve_system()
+            "system": self._resolve_system(),
         }
 
-        self._threads = [
+        session_id = str(uuid.uuid4())
+        output_dir = Path(tempfile.gettempdir()) / "sluchawa_records" / session_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        recording = _Recording(output_dir=output_dir)
+        self.session_id = session_id
+        self._recording = recording
+
+        recording.threads = [
             threading.Thread(
                 target=self._capture,
-                args=(sources[key], key),
+                args=(sources[key], key, recording),
                 name=f"sluchawa-{key}",
                 daemon=True,
-            ) for key in TRACKS
+            )
+            for key in TRACKS
         ]
 
-        for thread in self._threads:
+        for thread in recording.threads:
             thread.start()
 
 
-    def _capture(self, source, key: str):
+    def _capture(self, source, key: str, recording: _Recording) -> None:
         try:
-            with source.recorder(samplerate=RATE) as recorder:
-                while not self._stop.is_set():
-                    self._chunks[key].append(recorder.record(numframes=1024))
-        except Exception as ex:
+            with source.recorder(samplerate=RATE,channels=1,blocksize=BLOCK_SIZE) as recorder:
+                while not recording.stop.is_set():
+                    recording.chunks[key].append(
+                        recorder.record(numframes=BLOCK_SIZE)
+                    )
+        except Exception as ex:  # noqa: BLE001 - never let a capture thread die silently
             logger.error(f"{key} capture failed: {ex}")
-            self._errors.append(ex)
+            recording.errors.append(ex)
 
 
-    def stop_recording(self):
-        if not self._threads:
+    def stop_recording(self) -> None:
+        recording, self._recording = self._recording, None
+        if recording is None:
             return
 
-        self._stop.set()
-        for thread in self._threads:
-            thread.join(timeout=2)
+        recording.stop.set()
+        deadline = time.monotonic() + STOP_TIMEOUT
+        for thread in recording.threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
 
-        self._threads = []
+        stuck = [thread.name for thread in recording.threads if thread.is_alive()]
+        if stuck:
+            logger.warning(
+                f"Capture threads did not stop in time, "
+                f"their last audio is discarded: {stuck}"
+            )
+
         self._add_audio_to_queue(
-            error=self._errors[0] if self._errors else None
+            recording,
+            error=recording.errors[0] if recording.errors else None,
         )
 
-    def add_file_to_queue(self, file_path: str | Path):
+    def add_file_to_queue(self, file_path: str | Path) -> None:
         path = Path(file_path)
 
         if not path.is_file():
@@ -103,18 +129,17 @@ class LocalAudioInputAdapter:
 
         self._domain_port.submit_audio([path])
 
-    def _add_audio_to_queue(self, error: Exception | None):
+    def _add_audio_to_queue(
+        self, recording: _Recording, error: Exception | None
+    ) -> None:
         if error:
             logger.error(f"There was an error while recording: {error}")
 
-        if not self._output_dir:
-            return
-
-        paths = []
+        paths: list[Path] = []
         for key in TRACKS:
             try:
-                path = self._save_track(key)
-            except Exception as ex:
+                path = self._save_track(recording, key)
+            except Exception as ex:  # noqa: BLE001
                 logger.error(f"Failed to save {key}: {ex}")
                 continue
             if path is not None:
@@ -124,9 +149,10 @@ class LocalAudioInputAdapter:
             self._domain_port.submit_audio(paths)
 
 
-    def _save_track(self, key: str) -> Path | None:
-        chunks = self._chunks.get(key, [])
-        if not chunks or self._output_dir is None:
+    def _save_track(self, recording: _Recording, key: str) -> Path | None:
+        # Snapshot: a timed-out capture thread may still append to this list.
+        chunks = list(recording.chunks.get(key, []))
+        if not chunks:
             return None
 
         audio = np.concatenate(chunks, axis=0)
@@ -135,14 +161,14 @@ class LocalAudioInputAdapter:
         if audio.size == 0:
             return None
 
-        path = self._output_dir / f"{key}.ogg"
+        path = recording.output_dir / f"{key}.ogg"
         sf.write(
             path,
             audio,
             RATE,
             format="OGG",
             subtype="OPUS",
-            compression_level=0.9
+            compression_level=0.85,
         )
         return path
 
