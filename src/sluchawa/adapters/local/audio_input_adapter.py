@@ -154,6 +154,7 @@ class LocalAudioInputAdapter:
             return None
 
         audio = np.concatenate(chunks, axis=0)
+        recording.chunks[key] = []
         audio = audio.mean(axis=1) if audio.ndim > 1 else audio
 
         if audio.size == 0:
