@@ -1,21 +1,22 @@
+import tempfile
 import threading
 import uuid
+from pathlib import Path
 
 import numpy as np
 import soundcard as sc
 import soundfile as sf
 
-from pathlib import Path
 from loguru import logger
 
 from sluchawa.ports.audio_input_port import AudioInputPort
 
 TRACKS = ("mic", "system")
-BITRATE = 16_000
+RATE = 16_000
 
 class LocalAudioInputAdapter:
-    def __init__(self, mic_name: str | None = None, speaker_name: str | None = None):
-        # self._domain_port: AudioInputPort = domain_port
+    def __init__(self, domain_port: AudioInputPort, mic_name: str | None = None, speaker_name: str | None = None):
+        self._domain_port: AudioInputPort = domain_port
         self._speaker_name: str | None = speaker_name
         self._mic_name: str | None = mic_name
 
@@ -29,9 +30,8 @@ class LocalAudioInputAdapter:
 
     def start_recording(self):
         self.session_id = str(uuid.uuid4())
-        self._output_dir = Path(f"/tmp/sluchawa_records/{self.session_id}")
+        self._output_dir = Path(f"{tempfile.gettempdir()}/sluchawa_records/{self.session_id}")
         self._output_dir.mkdir(parents=True, exist_ok=True)
-
         self._stop.clear()
         self._chunks = { key: [] for key in TRACKS}
         self._errors = []
@@ -56,7 +56,7 @@ class LocalAudioInputAdapter:
 
     def _capture(self, source, key: str):
         try:
-            with source.recorder(samplerate=BITRATE) as recorder:
+            with source.recorder(samplerate=RATE) as recorder:
                 while not self._stop.is_set():
                     self._chunks[key].append(recorder.record(numframes=1024))
         except Exception as ex:
@@ -95,7 +95,7 @@ class LocalAudioInputAdapter:
             return
 
         logger.info(f"File {audio.name} is added to path")
-        # self._domain_port.submit_audio([path])
+        self._domain_port.submit_audio([path])
 
     def add_audio_to_queue(self, error: Exception | None):
         if error:
@@ -110,8 +110,8 @@ class LocalAudioInputAdapter:
         ]
 
         if paths:
-            # self._domain_port.submit_audio(paths)
-            pass
+            self._domain_port.submit_audio(paths)
+
 
     def _save_track(self, key: str) -> Path | None:
         chunks = self._chunks.get(key, [])
@@ -125,7 +125,7 @@ class LocalAudioInputAdapter:
         sf.write(
             path,
             audio,
-            BITRATE,
+            RATE,
             format="OGG",
             subtype="OPUS",
             compression_level=0.9
@@ -144,15 +144,3 @@ class LocalAudioInputAdapter:
             else sc.default_speaker()
         )
         return sc.get_microphone(f"{speaker.id}.monitor", include_loopback=True)
-
-if __name__ == "__main__":
-    # import time
-    #
-    adapter = LocalAudioInputAdapter(mic_name="alsa_input.pci-0000_00_1b.0.analog-stereo", speaker_name=None)
-    # adapter.start_recording()
-    # print("Recording for 10 seconds...")
-    # time.sleep(10)
-    # adapter.stop_recording()
-    # print(f"Saved to: {adapter._output_dir}")
-    adapter.add_file_to_queue("/tmp/sluchawa_records/74a03600-e1b7-43d2-b928-a83b7da544ac")
-
