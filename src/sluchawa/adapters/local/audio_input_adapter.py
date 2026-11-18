@@ -77,6 +77,26 @@ class LocalAudioInputAdapter:
             error=self._errors[0] if self._errors else None
         )
 
+    def add_file_to_queue(self, file_path: str):
+        path = Path(file_path)
+
+        if not path.is_file():
+            logger.error(f"Element in path ({path}) is not a file")
+            return
+
+        audio = sf.info(path)
+
+        if audio.format != "OGG":
+            logger.error(f"File {audio.name} format must be \'OGG\'")
+            return
+
+        if audio.subtype != "OPUS":
+            logger.error(f"File {audio.name} subtype must be \'OPUS\'")
+            return
+
+        logger.info(f"File {audio.name} is added to path")
+        # self._domain_port.submit_audio([path])
+
     def add_audio_to_queue(self, error: Exception | None):
         if error:
             logger.error(f"There was an error while recording: {error}")
@@ -126,11 +146,13 @@ class LocalAudioInputAdapter:
         return sc.get_microphone(f"{speaker.id}.monitor", include_loopback=True)
 
 if __name__ == "__main__":
-    import time
-
+    # import time
+    #
     adapter = LocalAudioInputAdapter(mic_name="alsa_input.pci-0000_00_1b.0.analog-stereo", speaker_name=None)
-    adapter.start_recording()
-    print("Recording for 10 seconds...")
-    time.sleep(10)
-    adapter.stop_recording()
-    print(f"Saved to: {adapter._output_dir}")
+    # adapter.start_recording()
+    # print("Recording for 10 seconds...")
+    # time.sleep(10)
+    # adapter.stop_recording()
+    # print(f"Saved to: {adapter._output_dir}")
+    adapter.add_file_to_queue("/tmp/sluchawa_records/74a03600-e1b7-43d2-b928-a83b7da544ac")
+
