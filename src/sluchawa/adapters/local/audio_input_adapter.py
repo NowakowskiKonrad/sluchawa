@@ -36,7 +36,6 @@ class LocalAudioInputAdapter:
         self._speaker_name: str | None = speaker_name
         self._mic_name: str | None = mic_name
 
-        self.session_id: str | None = None
         self._recording: _Recording | None = None
 
 
@@ -55,7 +54,6 @@ class LocalAudioInputAdapter:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         recording = _Recording(output_dir=output_dir)
-        self.session_id = session_id
         self._recording = recording
 
         recording.threads = [
