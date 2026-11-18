@@ -30,14 +30,19 @@ class _Recording:
     errors: list[Exception] = field(default_factory=list)
     threads: list[threading.Thread] = field(default_factory=list)
 
+
 class LocalAudioInputAdapter:
-    def __init__(self, domain_port: AudioInputPort, mic_name: str | None = None, speaker_name: str | None = None):
+    def __init__(
+            self,
+            domain_port: AudioInputPort,
+            mic_name: str | None = None,
+            speaker_name: str | None = None
+    ):
         self._domain_port: AudioInputPort = domain_port
         self._speaker_name: str | None = speaker_name
         self._mic_name: str | None = mic_name
 
         self._recording: _Recording | None = None
-
 
     def start_recording(self) -> None:
         if self._recording is not None:
@@ -69,18 +74,16 @@ class LocalAudioInputAdapter:
         for thread in recording.threads:
             thread.start()
 
-
     def _capture(self, source, key: str, recording: _Recording) -> None:
         try:
-            with source.recorder(samplerate=RATE,channels=1,blocksize=BLOCK_SIZE) as recorder:
+            with source.recorder(
+                    samplerate=RATE,channels=1,blocksize=BLOCK_SIZE
+            ) as recorder:
                 while not recording.stop.is_set():
-                    recording.chunks[key].append(
-                        recorder.record(numframes=BLOCK_SIZE)
-                    )
+                    recording.chunks[key].append(recorder.record(numframes=BLOCK_SIZE))
         except Exception as ex:  # noqa: BLE001 - never let a capture thread die silently
             logger.error(f"{key} capture failed: {ex}")
             recording.errors.append(ex)
-
 
     def stop_recording(self) -> None:
         recording, self._recording = self._recording, None
@@ -118,11 +121,11 @@ class LocalAudioInputAdapter:
             return
 
         if audio.format != "OGG":
-            logger.error(f"File {audio.name} format must be \'OGG\'")
+            logger.error(f"File {audio.name} format must be 'OGG'")
             return
 
         if audio.subtype != "OPUS":
-            logger.error(f"File {audio.name} subtype must be \'OPUS\'")
+            logger.error(f"File {audio.name} subtype must be 'OPUS'")
             return
 
         self._domain_port.submit_audio([path])
@@ -145,7 +148,6 @@ class LocalAudioInputAdapter:
 
         if paths:
             self._domain_port.submit_audio(paths)
-
 
     def _save_track(self, recording: _Recording, key: str) -> Path | None:
         # Snapshot: a timed-out capture thread may still append to this list.
