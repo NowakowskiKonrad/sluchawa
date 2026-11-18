@@ -8,10 +8,12 @@ import pytest
 import soundfile as sf
 
 from sluchawa.adapters.local.audio_input_adapter import (
+    _STOP,
     BLOCK_SIZE,
     RATE,
     LocalAudioInputAdapter,
     _Recording,
+    _Track,
 )
 
 MODULE_PATH = "sluchawa.adapters.local.audio_input_adapter"
@@ -70,6 +72,18 @@ def wait_for(predicate, timeout: float = 2.0) -> bool:
     return False
 
 
+def make_recording(output_dir, keys=("mic", "system")) -> _Recording:
+    recording = _Recording(output_dir=output_dir)
+    recording.tracks = {
+        key: _Track(
+            part_path=output_dir / f"{key}.ogg.part",
+            final_path=output_dir / f"{key}.ogg",
+        )
+        for key in keys
+    }
+    return recording
+
+
 @pytest.fixture
 def port() -> MagicMock:
     return MagicMock()
@@ -101,19 +115,41 @@ def wire(adapter):
     adapter.stop_recording()
 
 
-def test_save_track_writes_ogg_opus(adapter, tmp_path):
+def test_writer_writes_ogg_opus(adapter, tmp_path):
     # Given
-    recording = _Recording(output_dir=tmp_path)
-    recording.chunks["mic"] = [np.zeros((1024, 1), dtype=np.float32)]
+    recording = make_recording(tmp_path, ("mic",))
+    track = recording.tracks["mic"]
+    track.blocks.put(np.zeros(BLOCK_SIZE, dtype=np.float32))
+    track.blocks.put(_STOP)
 
     # When
-    path = adapter._save_track(recording, "mic")
+    adapter._write(recording, "mic")
 
     # Then
-    info = sf.info(path)
-    assert path.suffix == ".ogg"
+    info = sf.info(track.final_path)
     assert (info.format, info.subtype) == ("OGG", "OPUS")
-    assert (info.samplerate, info.channels, info.frames) == (RATE, 1, 1024)
+    assert (info.samplerate, info.channels, info.frames) == (
+        RATE,
+        1,
+        BLOCK_SIZE,
+    )
+    assert not track.part_path.exists()
+    assert track.closed
+
+
+def test_writer_with_no_blocks_leaves_no_file(adapter, tmp_path):
+    # Given
+    recording = make_recording(tmp_path, ("mic",))
+    track = recording.tracks["mic"]
+    track.blocks.put(_STOP)
+
+    # When
+    adapter._write(recording, "mic")
+
+    # Then
+    assert not track.part_path.exists()
+    assert not track.final_path.exists()
+    assert not track.closed
 
 
 def test_capture_uses_16khz_mono_and_block_size(adapter, wire):
@@ -141,6 +177,7 @@ def test_stop_recording_submits_both_tracks(adapter, port, wire):
     session_dir = adapter._recording.output_dir
     assert wait_for(lambda: mic.recorder_obj.calls >= 3)
     assert wait_for(lambda: system.recorder_obj.calls >= 3)
+    port.submit_audio.assert_not_called()
 
     # When
     mic.recorder_obj.release.set()
@@ -153,6 +190,7 @@ def test_stop_recording_submits_both_tracks(adapter, port, wire):
     assert [path.name for path in paths] == ["mic.ogg", "system.ogg"]
     assert all(path.parent == session_dir for path in paths)
     assert all(sf.info(path).subtype == "OPUS" for path in paths)
+    assert not list(session_dir.glob("*.part"))
     assert adapter._recording is None
 
 
@@ -175,7 +213,7 @@ def test_failed_capture_still_submits_healthy_track(adapter, port, wire, mocker)
 
 def test_no_audio_does_not_submit(adapter, port, tmp_path):
     # When
-    adapter._add_audio_to_queue(_Recording(output_dir=tmp_path), error=None)
+    adapter._add_audio_to_queue(make_recording(tmp_path), error=None)
 
     # Then
     port.submit_audio.assert_not_called()
@@ -219,8 +257,8 @@ def test_stuck_capture_thread_is_detached(adapter, port, wire, mocker):
 
     # Then
     assert adapter._recording is None
-    warning.assert_called_once()
-    assert "sluchawa-system" in warning.call_args.args[0]
+    messages = [str(call.args[0]) for call in warning.call_args_list]
+    assert any("sluchawa-system" in message for message in messages)
     port.submit_audio.assert_not_called()
 
     # A new session must work while the old threads are still parked.
@@ -231,8 +269,81 @@ def test_stuck_capture_thread_is_detached(adapter, port, wire, mocker):
     # Late writes from the abandoned session must not reach the new one.
     for recorder in (mic.recorders[0], system.recorders[0]):
         recorder.release.set()
-    assert wait_for(lambda: len(first_recording.chunks["mic"]) == 1)
-    assert second_recording.chunks["mic"] == []
+    assert wait_for(lambda: first_recording.tracks["mic"].blocks.qsize() == 1)
+    assert second_recording.tracks["mic"].blocks.qsize() == 0
+
+
+def test_queue_bound_is_respected(adapter, tmp_path, mocker):
+    # Given
+    mocker.patch(f"{MODULE_PATH}.QUEUE_BLOCKS", 2)
+    recording = make_recording(tmp_path, ("mic",))
+    source = FakeSource(count=10**6)
+    thread = threading.Thread(target=adapter._capture, args=(source, "mic", recording))
+    thread.start()
+
+    try:
+        # When
+        assert wait_for(lambda: recording.tracks["mic"].dropped > 0)
+
+        # Then
+        assert recording.tracks["mic"].blocks.qsize() <= 2
+        assert recording.tracks["mic"].blocks.maxsize == 2
+    finally:
+        recording.stop.set()
+        if source.recorder_obj is not None:
+            source.recorder_obj.release.set()
+        thread.join(5)
+
+
+def test_dropped_blocks_are_reported(adapter, port, tmp_path, mocker):
+    # Given
+    warning = mocker.patch(f"{MODULE_PATH}.logger.warning")
+    recording = make_recording(tmp_path, ("mic",))
+    track = recording.tracks["mic"]
+    track.closed = True
+    track.frames = BLOCK_SIZE
+    track.dropped = 3
+
+    # When
+    adapter._add_audio_to_queue(recording, error=None)
+
+    # Then
+    messages = [str(call.args[0]) for call in warning.call_args_list]
+    assert any("dropped 3 blocks" in message for message in messages)
+    port.submit_audio.assert_called_once_with([track.final_path])
+
+
+def test_writer_failure_keeps_other_track(adapter, port, wire, mocker):
+    # Given
+    error_log = mocker.patch(f"{MODULE_PATH}.logger.error")
+    open_soundfile = sf.SoundFile
+
+    def fake_soundfile(path, *args, **kwargs):
+        if "system" in str(path):
+            raise RuntimeError("disk full")
+        return open_soundfile(path, *args, **kwargs)
+
+    mocker.patch(f"{MODULE_PATH}.sf.SoundFile", side_effect=fake_soundfile)
+    mic, system = wire({"count": 3}, {"count": 3})
+
+    # When
+    adapter.start_recording()
+    session_dir = adapter._recording.output_dir
+    assert wait_for(lambda: mic.recorder_obj.calls >= 3)
+    assert wait_for(lambda: adapter._recording.tracks["system"].failed.is_set())
+    mic.recorder_obj.release.set()
+    if system.recorder_obj is not None:
+        system.recorder_obj.release.set()
+    adapter.stop_recording()
+
+    # Then
+    paths = port.submit_audio.call_args.args[0]
+    assert [path.name for path in paths] == ["mic.ogg"]
+    assert not (session_dir / "system.ogg").exists()
+    assert "system writer failed" in str(error_log.call_args_list)
+
+
+
 
 
 def test_add_file_to_queue_accepts_ogg_opus(adapter, port, tmp_path):
