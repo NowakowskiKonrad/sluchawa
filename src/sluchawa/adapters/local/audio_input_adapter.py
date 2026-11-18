@@ -168,7 +168,7 @@ class LocalAudioInputAdapter:
             RATE,
             format="OGG",
             subtype="OPUS",
-            compression_level=0.85,
+            compression_level=0.9,
         )
         return path
 
