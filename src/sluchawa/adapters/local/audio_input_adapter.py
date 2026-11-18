@@ -29,6 +29,9 @@ class LocalAudioInputAdapter:
 
 
     def start_recording(self):
+        if self._threads:
+            logger.error("Only one local recording can be run at the same time.")
+            return
         self.session_id = str(uuid.uuid4())
         self._output_dir = Path(f"{tempfile.gettempdir()}/sluchawa_records/{self.session_id}")
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -70,21 +73,25 @@ class LocalAudioInputAdapter:
 
         self._stop.set()
         for thread in self._threads:
-            thread.join()
+            thread.join(timeout=2)
 
         self._threads = []
-        self.add_audio_to_queue(
+        self._add_audio_to_queue(
             error=self._errors[0] if self._errors else None
         )
 
-    def add_file_to_queue(self, file_path: str):
+    def add_file_to_queue(self, file_path: str | Path):
         path = Path(file_path)
 
         if not path.is_file():
             logger.error(f"Element in path ({path}) is not a file")
             return
 
-        audio = sf.info(path)
+        try:
+            audio = sf.info(path)
+        except (RuntimeError, sf.LibsndfileError) as ex:
+            logger.error(f"Cannot read {path}: {ex}")
+            return
 
         if audio.format != "OGG":
             logger.error(f"File {audio.name} format must be \'OGG\'")
@@ -94,20 +101,24 @@ class LocalAudioInputAdapter:
             logger.error(f"File {audio.name} subtype must be \'OPUS\'")
             return
 
-        logger.info(f"File {audio.name} is added to path")
         self._domain_port.submit_audio([path])
 
-    def add_audio_to_queue(self, error: Exception | None):
+    def _add_audio_to_queue(self, error: Exception | None):
         if error:
             logger.error(f"There was an error while recording: {error}")
 
         if not self._output_dir:
             return
 
-        paths = [
-            path for key in TRACKS
-            if (path := self._save_track(key)) is not None
-        ]
+        paths = []
+        for key in TRACKS:
+            try:
+                path = self._save_track(key)
+            except Exception as ex:
+                logger.error(f"Failed to save {key}: {ex}")
+                continue
+            if path is not None:
+                paths.append(path)
 
         if paths:
             self._domain_port.submit_audio(paths)
@@ -119,7 +130,10 @@ class LocalAudioInputAdapter:
             return None
 
         audio = np.concatenate(chunks, axis=0)
-        audio = audio.mean(axis=1)
+        audio = audio.mean(axis=1) if audio.ndim > 1 else audio
+
+        if audio.size == 0:
+            return None
 
         path = self._output_dir / f"{key}.ogg"
         sf.write(
