@@ -51,6 +51,11 @@ class _Recording:
 
 
 class LocalAudioInputAdapter:
+    """Records the microphone and the system output as OGG/Opus files.
+
+    Each track is captured and encoded in its own thread, so audio goes to disk as it arrives.
+    On stop, the finished files are handed to the domain port via ``submit_audio``.
+    """
     def __init__(
         self,
         domain_port: AudioInputPort,
