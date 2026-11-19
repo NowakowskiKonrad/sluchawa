@@ -7,7 +7,6 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import soundcard as sc
 import soundfile as sf
 from loguru import logger
 
@@ -364,6 +363,8 @@ class LocalAudioInputAdapter:
             self._domain_port.submit_audio(paths)
 
     def _resolve_mic(self):
+        import soundcard as sc
+
         source = (
             sc.get_microphone(self._mic_name)
             if self._mic_name
@@ -374,6 +375,8 @@ class LocalAudioInputAdapter:
         return source
 
     def _resolve_system(self):
+        import soundcard as sc
+
         speaker = (
             sc.get_speaker(self._speaker_name)
             if self._speaker_name
