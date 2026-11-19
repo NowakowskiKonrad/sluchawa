@@ -162,11 +162,19 @@ class LocalAudioInputAdapter:
             track.failed.set()
             return
 
-        if track.frames:
-            track.part_path.replace(track.final_path)
-            track.closed = True
-        else:
-            track.part_path.unlink(missing_ok=True)
+        try:
+            if track.frames:
+                track.part_path.replace(track.final_path)
+                track.closed = True
+            else:
+                track.part_path.unlink(missing_ok=True)
+        except OSError as ex:
+            logger.error(
+                f"{key} could not finalize {track.part_path.name}: {ex}; "
+                f"file kept for salvage"
+            )
+            recording.errors.append(ex)
+            track.failed.set()
 
     def stop_recording(self) -> None:
         recording, self._recording = self._recording, None
