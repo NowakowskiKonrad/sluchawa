@@ -1,4 +1,5 @@
 import queue
+import shutil
 import tempfile
 import threading
 import time
@@ -22,6 +23,8 @@ BLOCK_SIZE = 1024
 # Bounds RAM: 512 blocks * 1024 frames * 4 B = 2 MiB per track.
 # 512 blocks at 16 kHz is roughly 32 s of audio in flight.
 QUEUE_BLOCKS = 512
+# Session directories in the default temp root older than this are swept on start.
+RETENTION_SECONDS = 24 * 60 * 60
 
 
 @dataclass
@@ -57,6 +60,11 @@ class LocalAudioInputAdapter:
 
     Each track is captured and encoded in its own thread, so audio goes to disk as it arrives.
     On stop, the finished files are handed to the domain port via ``submit_audio``.
+
+    System capture uses the PulseAudio monitor source, so this adapter targets Linux.
+    Recordings are written to a private session directory and are not deleted
+    automatically: callers own the files after ``submit_audio``, and sessions in the
+    default temp root are swept after ``RETENTION_SECONDS``.
     """
     def __init__(
         self,
@@ -68,60 +76,93 @@ class LocalAudioInputAdapter:
         self._domain_port: AudioInputPort = domain_port
         self._speaker_name: str | None = speaker_name
         self._mic_name: str | None = mic_name
+        self._owns_output_root: bool = output_root is None
         self._output_root: Path = (
             Path(output_root) if output_root else Path(tempfile.gettempdir()) / "sluchawa_records"
         )
+        self._lock = threading.RLock()
 
         self.session_id: str | None = None
         self._recording: _Recording | None = None
 
-    def start_recording(self) -> None:
-        if self._recording is not None:
-            logger.error("Only one local recording can be run at the same time.")
-            return
+    def start_recording(self) -> bool:
+        """Start capturing every source that is available.
 
-        sources = {
-            "mic": self._resolve_mic(),
-            "system": self._resolve_system(),
-        }
+        Returns:
+            True if at least one track started, False otherwise.
+        """
+        with self._lock:
+            if self._recording is not None:
+                logger.error("Only one local recording can be run at the same time.")
+                return False
 
-        session_id = str(uuid.uuid4())
-        output_dir = self._output_root / session_id
-        output_dir.mkdir(parents=True, exist_ok=True)
+            sources: dict[str, object] = {}
+            errors: list[Exception] = []
+            for key, resolver in (
+                ("mic", self._resolve_mic),
+                ("system", self._resolve_system),
+            ):
+                try:
+                    sources[key] = resolver()
+                except Exception as ex:  # noqa: BLE001 - one bad device must not kill the other
+                    logger.error(f"{key} source unavailable: {ex}")
+                    errors.append(ex)
 
-        recording = _Recording(output_dir=output_dir)
-        recording.tracks = {
-            key: _Track(
-                part_path=output_dir / f"{key}.ogg.part",
-                final_path=output_dir / f"{key}.ogg",
-            )
-            for key in TRACKS
-        }
+            if not sources:
+                logger.error("No audio source is available, recording not started.")
+                return False
 
-        self.session_id = session_id
-        self._recording = recording
+            session_id = str(uuid.uuid4())
+            output_dir = self._output_root / session_id
+            try:
+                self._secure_root()
+                self._cleanup_stale_sessions()
+                output_dir.mkdir(mode=0o700)
+            except OSError as ex:
+                logger.error(f"Could not create recording directory {output_dir}: {ex}")
+                return False
 
-        for key, track in recording.tracks.items():
-            track.writer = threading.Thread(
-                target=self._write,
-                args=(recording, key),
-                name=f"sluchawa-{key}-writer",
-                daemon=True,
-            )
-            track.writer.start()
+            recording = _Recording(output_dir=output_dir)
+            recording.errors.extend(errors)
+            recording.tracks = {
+                key: _Track(
+                    part_path=output_dir / f"{key}.ogg.part",
+                    final_path=output_dir / f"{key}.ogg",
+                )
+                for key in TRACKS
+            }
 
-        recording.threads = [
-            threading.Thread(
-                target=self._capture,
-                args=(sources[key], key, recording),
-                name=f"sluchawa-{key}",
-                daemon=True,
-            )
-            for key in TRACKS
-        ]
+            self.session_id = session_id
+            self._recording = recording
 
-        for thread in recording.threads:
-            thread.start()
+            try:
+                for key in sources:
+                    track = recording.tracks[key]
+                    track.writer = threading.Thread(
+                        target=self._write,
+                        args=(recording, key),
+                        name=f"sluchawa-{key}-writer",
+                        daemon=True,
+                    )
+                    track.writer.start()
+
+                for key, source in sources.items():
+                    thread = threading.Thread(
+                        target=self._capture,
+                        args=(source, key, recording),
+                        name=f"sluchawa-{key}",
+                        daemon=True,
+                    )
+                    thread.start()
+                    recording.threads.append(thread)
+            except Exception as ex:  # noqa: BLE001 - roll back a half-started session
+                logger.error(f"Could not start recording threads: {ex}")
+                self._abort_recording(recording)
+                self._recording = None
+                self.session_id = None
+                return False
+
+            return True
 
     def _capture(self, source, key: str, recording: _Recording) -> None:
         track = recording.tracks[key]
@@ -184,33 +225,80 @@ class LocalAudioInputAdapter:
             track.failed.set()
 
     def stop_recording(self) -> None:
-        recording, self._recording = self._recording, None
-        if recording is None:
-            return
+        with self._lock:
+            recording, self._recording = self._recording, None
+            if recording is None:
+                return
 
-        recording.stop.set()
-        deadline = time.monotonic() + STOP_TIMEOUT
-        for thread in recording.threads:
-            thread.join(max(0.0, deadline - time.monotonic()))
+            self.session_id = None
+            recording.stop.set()
+            deadline = time.monotonic() + STOP_TIMEOUT
+            for thread in recording.threads:
+                thread.join(max(0.0, deadline - time.monotonic()))
 
-        stuck = [thread.name for thread in recording.threads if thread.is_alive()]
-        if stuck:
-            logger.warning(
-                f"Capture threads did not stop in time, "
-                f"audio captured from now on is discarded: {stuck}"
+            stuck = [thread.name for thread in recording.threads if thread.is_alive()]
+            if stuck:
+                logger.warning(
+                    f"Capture threads did not stop in time, "
+                    f"audio captured from now on is discarded: {stuck}"
+                )
+
+            for track in recording.tracks.values():
+                track.shutdown.set()
+
+            deadline = time.monotonic() + WRITER_TIMEOUT
+            for key, track in recording.tracks.items():
+                self._stop_writer(key, track, deadline)
+
+            self._add_audio_to_queue(
+                recording,
+                error=recording.errors[0] if recording.errors else None,
             )
 
+    def _abort_recording(self, recording: _Recording) -> None:
+        """Stop and discard a session whose threads failed to start."""
+        recording.stop.set()
         for track in recording.tracks.values():
             track.shutdown.set()
 
-        deadline = time.monotonic() + WRITER_TIMEOUT
-        for key, track in recording.tracks.items():
-            self._stop_writer(key, track, deadline)
+        for thread in recording.threads:
+            thread.join(STOP_TIMEOUT)
+        for track in recording.tracks.values():
+            if track.writer is not None:
+                track.writer.join(WRITER_TIMEOUT)
 
-        self._add_audio_to_queue(
-            recording,
-            error=recording.errors[0] if recording.errors else None,
-        )
+        shutil.rmtree(recording.output_dir, ignore_errors=True)
+
+    def _secure_root(self) -> None:
+        """Create the output root and keep the default temp root private."""
+        self._output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not self._owns_output_root:
+            return
+        try:
+            self._output_root.chmod(0o700)
+        except OSError as ex:
+            logger.warning(
+                f"Could not restrict permissions on {self._output_root}: {ex}"
+            )
+
+    def _cleanup_stale_sessions(self) -> None:
+        """Remove old session dirs from the default temp root only."""
+        if not self._owns_output_root or not self._output_root.is_dir():
+            return
+
+        cutoff = time.time() - RETENTION_SECONDS
+        for entry in self._output_root.iterdir():
+            try:
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+            except OSError as ex:
+                logger.warning(f"Could not inspect {entry}: {ex}")
+                continue
+
+            logger.info(f"Removing stale recording session {entry.name}")
+            shutil.rmtree(entry, ignore_errors=True)
 
     def _stop_writer(self, key: str, track: _Track, deadline: float) -> None:
         writer = track.writer
@@ -276,9 +364,14 @@ class LocalAudioInputAdapter:
             self._domain_port.submit_audio(paths)
 
     def _resolve_mic(self):
-        if self._mic_name:
-            return sc.get_microphone(self._mic_name)
-        return sc.default_microphone()
+        source = (
+            sc.get_microphone(self._mic_name)
+            if self._mic_name
+            else sc.default_microphone()
+        )
+        if source is None:
+            raise RuntimeError("No microphone is available")
+        return source
 
     def _resolve_system(self):
         speaker = (
@@ -286,4 +379,6 @@ class LocalAudioInputAdapter:
             if self._speaker_name
             else sc.default_speaker()
         )
+        if speaker is None:
+            raise RuntimeError("No output device is available for system capture")
         return sc.get_microphone(f"{speaker.id}.monitor", include_loopback=True)
