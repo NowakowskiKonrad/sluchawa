@@ -61,7 +61,7 @@ class LocalAudioInputAdapter:
     Each track is captured and encoded in its own thread, so audio goes to disk as it arrives.
     On stop, the finished files are handed to the domain port via ``submit_audio``.
 
-    System capture uses the PulseAudio monitor source, so this adapter targets Linux.
+    System capture uses monitor source, so this adapter targets Linux.
     Recordings are written to a private session directory and are not deleted
     automatically: callers own the files after ``submit_audio``, and sessions in the
     default temp root are swept after ``RETENTION_SECONDS``.
