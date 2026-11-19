@@ -305,3 +305,78 @@ def test_add_file_to_queue_rejects_invalid_files(adapter, port, tmp_path, mocker
     port.submit_audio.assert_not_called()
     assert "format must be" in str(error_log.call_args_list)
     assert "Cannot read" in str(error_log.call_args_list)
+
+
+def test_full_queue_at_stop_does_not_hang_writer(adapter, port, wire, mocker):
+    # Given: writers stalled longer than the old sentinel timeout while their
+    # queues are full, which used to leave them blocked on get() forever.
+    mocker.patch(f"{MODULE_PATH}.QUEUE_BLOCKS", 2)
+    mocker.patch(f"{MODULE_PATH}.WRITER_TIMEOUT", 5.0)
+
+    real_write = sf.SoundFile.write
+    stalled: set[str] = set()
+
+    def slow_write(self, data, *args, **kwargs):
+        if str(self.name) not in stalled:
+            stalled.add(str(self.name))
+            time.sleep(1.5)
+        return real_write(self, data, *args, **kwargs)
+
+    mocker.patch.object(sf.SoundFile, "write", slow_write)
+    mic, system = wire({"count": 10}, {"count": 10})
+
+    # When
+    adapter.start_recording()
+    recording = adapter._recording
+    assert wait_for(lambda: mic.recorder_obj.calls >= 10)
+    assert wait_for(lambda: system.recorder_obj.calls >= 10)
+    mic.recorder_obj.release.set()
+    system.recorder_obj.release.set()
+    adapter.stop_recording()
+
+    # Then: both writers drain and finalize instead of hanging on get().
+    writers = (recording.tracks["mic"].writer, recording.tracks["system"].writer)
+    assert wait_for(lambda: not any(writer.is_alive() for writer in writers), timeout=5)
+    assert recording.tracks["mic"].closed
+    assert recording.tracks["system"].closed
+    assert port.submit_audio.called
+
+
+def test_writer_outliving_stop_terminates_after_unblocking(adapter, port, wire, mocker):
+    # Given: a writer stuck in I/O when the stop deadline expires.
+    mocker.patch(f"{MODULE_PATH}.QUEUE_BLOCKS", 2)
+    mocker.patch(f"{MODULE_PATH}.WRITER_TIMEOUT", 0.1)
+    warning = mocker.patch(f"{MODULE_PATH}.logger.warning")
+
+    gate = threading.Event()
+    real_write = sf.SoundFile.write
+
+    def blocked_write(self, data, *args, **kwargs):
+        gate.wait(timeout=5)
+        return real_write(self, data, *args, **kwargs)
+
+    mocker.patch.object(sf.SoundFile, "write", blocked_write)
+    mic, system = wire({"count": 10}, {"count": 10})
+
+    adapter.start_recording()
+    recording = adapter._recording
+    assert wait_for(lambda: mic.recorder_obj.calls >= 10)
+    assert wait_for(lambda: system.recorder_obj.calls >= 10)
+    mic.recorder_obj.release.set()
+    system.recorder_obj.release.set()
+
+    # When
+    adapter.stop_recording()
+
+    # Then: stop detaches the writers and does not submit their tracks...
+    writers = (recording.tracks["mic"].writer, recording.tracks["system"].writer)
+    assert any(writer.is_alive() for writer in writers)
+    assert any("still draining" in str(call.args[0]) for call in warning.call_args_list)
+    port.submit_audio.assert_not_called()
+
+    # ...but they are only slow, not deadlocked: they finish once I/O returns.
+    gate.set()
+    assert wait_for(lambda: not any(writer.is_alive() for writer in writers), timeout=5)
+    assert recording.tracks["mic"].closed
+    assert recording.tracks["system"].closed
+
