@@ -1,5 +1,7 @@
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Self
 from unittest.mock import MagicMock
 
@@ -10,6 +12,7 @@ import soundfile as sf
 from sluchawa.adapters.local.audio_input_adapter import (
     BLOCK_SIZE,
     RATE,
+    RETENTION_SECONDS,
     LocalAudioInputAdapter,
     _Recording,
     _Track,
@@ -379,4 +382,116 @@ def test_writer_outliving_stop_terminates_after_unblocking(adapter, port, wire, 
     assert wait_for(lambda: not any(writer.is_alive() for writer in writers), timeout=5)
     assert recording.tracks["mic"].closed
     assert recording.tracks["system"].closed
+
+
+def test_start_returns_false_when_no_source_is_available(adapter, port, mocker):
+    # Given: both devices are missing.
+    adapter._resolve_mic = mocker.Mock(side_effect=RuntimeError("no mic"))
+    adapter._resolve_system = mocker.Mock(side_effect=RuntimeError("no speaker"))
+
+    # When
+    started = adapter.start_recording()
+
+    # Then
+    assert started is False
+    assert adapter._recording is None
+    port.submit_audio.assert_not_called()
+
+
+def test_start_records_available_track_when_other_source_fails(adapter, port, mocker):
+    # Given: only the microphone resolves.
+    error_log = mocker.patch(f"{MODULE_PATH}.logger.error")
+    mic = FakeSource(count=3)
+    adapter._resolve_mic = lambda: mic
+    adapter._resolve_system = mocker.Mock(side_effect=RuntimeError("no speaker"))
+
+    # When
+    started = adapter.start_recording()
+    assert started is True
+    assert wait_for(lambda: mic.recorder_obj is not None)
+    assert wait_for(lambda: mic.recorder_obj.calls >= 3)
+    mic.recorder_obj.release.set()
+    adapter.stop_recording()
+
+    # Then
+    paths = port.submit_audio.call_args.args[0]
+    assert [path.name for path in paths] == ["mic.ogg"]
+    assert "system source unavailable" in str(error_log.call_args_list)
+
+
+def test_finalize_failure_is_reported_and_keeps_part_file(adapter, port, wire, mocker):
+    # Given: the writer cannot rename its finished file.
+    error_log = mocker.patch(f"{MODULE_PATH}.logger.error")
+    mocker.patch.object(Path, "replace", side_effect=OSError("read-only filesystem"))
+    mic, system = wire({"count": 3}, {"count": 3})
+
+    # When
+    adapter.start_recording()
+    session_dir = adapter._recording.output_dir
+    assert wait_for(lambda: mic.recorder_obj.calls >= 3)
+    assert wait_for(lambda: system.recorder_obj.calls >= 3)
+    mic.recorder_obj.release.set()
+    system.recorder_obj.release.set()
+    adapter.stop_recording()
+
+    # Then: the failure is logged and the complete .part stays for salvage.
+    assert "could not finalize" in str(error_log.call_args_list)
+    port.submit_audio.assert_not_called()
+    assert (session_dir / "mic.ogg.part").exists()
+    assert not (session_dir / "mic.ogg").exists()
+
+
+def test_default_session_directories_are_private(adapter, wire):
+    # Given
+    mic, system = wire()
+
+    # When
+    adapter.start_recording()
+    session_dir = adapter._recording.output_dir
+
+    # Then
+    assert adapter._output_root.stat().st_mode & 0o777 == 0o700
+    assert session_dir.stat().st_mode & 0o777 == 0o700
+
+    for source in (mic, system):
+        assert wait_for(lambda source=source: source.recorder_obj is not None)
+        source.recorder_obj.release.set()
+    adapter.stop_recording()
+
+
+def test_stale_sessions_are_removed_for_default_root(adapter):
+    # Given
+    root = adapter._output_root
+    root.mkdir(parents=True, exist_ok=True)
+    stale = root / "stale"
+    fresh = root / "fresh"
+    stale.mkdir()
+    fresh.mkdir()
+    old = time.time() - RETENTION_SECONDS - 10
+    os.utime(stale, (old, old))
+
+    # When
+    adapter._cleanup_stale_sessions()
+
+    # Then
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_user_output_root_is_not_swept(tmp_path):
+    # Given: a user-managed directory that happens to be old.
+    root = tmp_path / "recordings"
+    root.mkdir()
+    stale = root / "stale"
+    stale.mkdir()
+    old = time.time() - RETENTION_SECONDS - 10
+    os.utime(stale, (old, old))
+    adapter = LocalAudioInputAdapter(domain_port=MagicMock(), output_root=root)
+
+    # When
+    adapter._cleanup_stale_sessions()
+
+    # Then: user-owned recordings are never deleted implicitly.
+    assert stale.exists()
+
 
