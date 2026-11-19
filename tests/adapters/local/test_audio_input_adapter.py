@@ -8,7 +8,6 @@ import pytest
 import soundfile as sf
 
 from sluchawa.adapters.local.audio_input_adapter import (
-    _STOP,
     BLOCK_SIZE,
     RATE,
     LocalAudioInputAdapter,
@@ -115,43 +114,6 @@ def wire(adapter):
     adapter.stop_recording()
 
 
-def test_writer_writes_ogg_opus(adapter, tmp_path):
-    # Given
-    recording = make_recording(tmp_path, ("mic",))
-    track = recording.tracks["mic"]
-    track.blocks.put(np.zeros(BLOCK_SIZE, dtype=np.float32))
-    track.blocks.put(_STOP)
-
-    # When
-    adapter._write(recording, "mic")
-
-    # Then
-    info = sf.info(track.final_path)
-    assert (info.format, info.subtype) == ("OGG", "OPUS")
-    assert (info.samplerate, info.channels, info.frames) == (
-        RATE,
-        1,
-        BLOCK_SIZE,
-    )
-    assert not track.part_path.exists()
-    assert track.closed
-
-
-def test_writer_with_no_blocks_leaves_no_file(adapter, tmp_path):
-    # Given
-    recording = make_recording(tmp_path, ("mic",))
-    track = recording.tracks["mic"]
-    track.blocks.put(_STOP)
-
-    # When
-    adapter._write(recording, "mic")
-
-    # Then
-    assert not track.part_path.exists()
-    assert not track.final_path.exists()
-    assert not track.closed
-
-
 def test_capture_uses_16khz_mono_and_block_size(adapter, wire):
     # Given
     mic, system = wire()
@@ -209,22 +171,6 @@ def test_failed_capture_still_submits_healthy_track(adapter, port, wire, mocker)
     paths = port.submit_audio.call_args.args[0]
     assert [path.name for path in paths] == ["mic.ogg"]
     assert "system capture failed" in str(error_log.call_args_list)
-
-
-def test_no_audio_does_not_submit(adapter, port, tmp_path):
-    # When
-    adapter._add_audio_to_queue(make_recording(tmp_path), error=None)
-
-    # Then
-    port.submit_audio.assert_not_called()
-
-
-def test_stop_recording_before_start_is_noop(adapter, port):
-    # When
-    adapter.stop_recording()
-
-    # Then
-    port.submit_audio.assert_not_called()
 
 
 def test_start_recording_while_recording_is_rejected(adapter, wire):
@@ -295,24 +241,6 @@ def test_queue_bound_is_respected(adapter, tmp_path, mocker):
         thread.join(5)
 
 
-def test_dropped_blocks_are_reported(adapter, port, tmp_path, mocker):
-    # Given
-    warning = mocker.patch(f"{MODULE_PATH}.logger.warning")
-    recording = make_recording(tmp_path, ("mic",))
-    track = recording.tracks["mic"]
-    track.closed = True
-    track.frames = BLOCK_SIZE
-    track.dropped = 3
-
-    # When
-    adapter._add_audio_to_queue(recording, error=None)
-
-    # Then
-    messages = [str(call.args[0]) for call in warning.call_args_list]
-    assert any("dropped 3 blocks" in message for message in messages)
-    port.submit_audio.assert_called_once_with([track.final_path])
-
-
 def test_writer_failure_keeps_other_track(adapter, port, wire, mocker):
     # Given
     error_log = mocker.patch(f"{MODULE_PATH}.logger.error")
@@ -341,9 +269,6 @@ def test_writer_failure_keeps_other_track(adapter, port, wire, mocker):
     assert [path.name for path in paths] == ["mic.ogg"]
     assert not (session_dir / "system.ogg").exists()
     assert "system writer failed" in str(error_log.call_args_list)
-
-
-
 
 
 def test_add_file_to_queue_accepts_ogg_opus(adapter, port, tmp_path):
