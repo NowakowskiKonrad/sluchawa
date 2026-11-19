@@ -12,9 +12,12 @@ dependencies = [
     "langchain>=1.4.7",
     "loguru>=0.8.0",
     "mypy>=2.4.1",
+    "numpy>=2.5.4",
     "py-cord[voice]>=2.8.1",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
+    "soundcard>=0.4.6",
+    "soundfile>=0.14.0",
 ]
 
 [project.scripts]
@@ -29,3 +32,7 @@ dev = [
     "pytest>=9.2.0",
     "pytest-mock>=3.17.0",
 ]
+
+[[tool.mypy.overrides]]
+module = ["soundcard", "soundfile"]
+ignore_missing_imports = true
