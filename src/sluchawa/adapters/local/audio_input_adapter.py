@@ -16,12 +16,12 @@ TRACKS = ("mic", "system")
 RATE = 16_000
 STOP_TIMEOUT = 2.0
 WRITER_TIMEOUT = 2.0
+# Writers re-check their shutdown flag at least this often while idle.
+WRITER_POLL = 0.1
 BLOCK_SIZE = 1024
 # Bounds RAM: 512 blocks * 1024 frames * 4 B = 2 MiB per track.
 # 512 blocks at 16 kHz is roughly 32 s of audio in flight.
 QUEUE_BLOCKS = 512
-
-_STOP = object()
 
 
 @dataclass
@@ -33,6 +33,7 @@ class _Track:
     blocks: queue.Queue = field(
         default_factory=lambda: queue.Queue(maxsize=QUEUE_BLOCKS)
     )
+    shutdown: threading.Event = field(default_factory=threading.Event)
     failed: threading.Event = field(default_factory=threading.Event)
     writer: threading.Thread | None = None
     frames: int = 0
@@ -153,7 +154,13 @@ class LocalAudioInputAdapter:
                 subtype="OPUS",
                 compression_level=0.9,
             ) as out:
-                while (item := track.blocks.get()) is not _STOP:
+                while True:
+                    try:
+                        item = track.blocks.get(timeout=WRITER_POLL)
+                    except queue.Empty:
+                        if track.shutdown.is_set():
+                            break
+                        continue
                     out.write(item)
                 track.frames = out.frames
         except Exception as ex:  # noqa: BLE001 - writer must not die silently
@@ -193,30 +200,29 @@ class LocalAudioInputAdapter:
                 f"audio captured from now on is discarded: {stuck}"
             )
 
+        for track in recording.tracks.values():
+            track.shutdown.set()
+
+        deadline = time.monotonic() + WRITER_TIMEOUT
         for key, track in recording.tracks.items():
-            self._stop_writer(key, track)
+            self._stop_writer(key, track, deadline)
 
         self._add_audio_to_queue(
             recording,
             error=recording.errors[0] if recording.errors else None,
         )
 
-    def _stop_writer(self, key: str, track: _Track) -> None:
+    def _stop_writer(self, key: str, track: _Track, deadline: float) -> None:
         writer = track.writer
         if writer is None:
             return
 
-        if writer.is_alive() and not self._enqueue_stop(track):
-            logger.warning(
-                f"{key} writer did not drain its queue, "
-                f"keeping {track.part_path.name} for salvage"
-            )
-
-        writer.join(WRITER_TIMEOUT)
+        writer.join(max(0.0, deadline - time.monotonic()))
         if writer.is_alive():
             logger.warning(
-                f"{key} writer did not stop in time, "
-                f"keeping {track.part_path.name} for salvage"
+                f"{key} writer is still draining after {WRITER_TIMEOUT}s; "
+                f"it will keep writing {track.final_path.name} in the background, "
+                f"but this track will not be submitted"
             )
 
     def add_file_to_queue(self, file_path: str | Path) -> None:
@@ -281,14 +287,3 @@ class LocalAudioInputAdapter:
             else sc.default_speaker()
         )
         return sc.get_microphone(f"{speaker.id}.monitor", include_loopback=True)
-
-    def _enqueue_stop(self, track: _Track, timeout: float = 1.0) -> bool:
-        """Push the sentinel after the queued blocks, within a timeout."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                track.blocks.put(_STOP, timeout=0.05)
-                return True
-            except queue.Full:
-                continue
-        return False
