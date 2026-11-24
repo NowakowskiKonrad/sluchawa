@@ -29,7 +29,7 @@ class Sluchawa:
 
         logger.info("Stopping Sluchawa domain worker thread...")
         self._stop_event.set()
-        self._worker_thread.join(timeout=5.0)
+        self._worker_thread.join()
         logger.info("Sluchawa domain worker thread stopped.")
 
     def _run(self) -> None:
@@ -41,8 +41,8 @@ class Sluchawa:
 
             try:
                 self._process_session(audio_paths)
-            except Exception as e:
-                logger.exception(f"Error while processing audio session: {e}")
+            except Exception:
+                logger.exception(f"Error while processing audio session.")
             finally:
                 self._audio_queue.task_done()
 
