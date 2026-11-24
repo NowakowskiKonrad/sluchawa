@@ -1,0 +1,12 @@
+Twoim zadaniem jest stworzenie notatki z podanej transkrypcji.
+
+Wymagania:
+* Wykorzystuj tylko informacje z transkrypcji, nie zgaduj i nie dopowiadaj.
+* Ignoruj powtórzenia i rozmowy niezwiązane z tematem.
+* Zachowaj język, w którym prowadzona jest rozmowa.
+* Zwróć tekst używając szablonu poniżej:
+
+--- Podsumowanie ---
+(Krótki opis, czego dotyczyła rozmowa)
+--- Kluczowe ustalenia ---
+- ...
