@@ -1,7 +1,9 @@
 import queue
 import threading
 from pathlib import Path
+
 from loguru import logger
+
 
 class Sluchawa:
     def __init__(self, audio_queue: queue.Queue[list[Path]]) -> None:
