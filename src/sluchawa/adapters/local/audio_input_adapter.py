@@ -1,146 +1,153 @@
 import tempfile
-import threading
 import uuid
 from pathlib import Path
 
 import numpy as np
-import soundcard as sc
+import sounddevice as sd
 import soundfile as sf
-
 from loguru import logger
 
 from sluchawa.ports.audio_input_port import AudioInputPort
 
-TRACKS = ("mic", "system")
-RATE = 16_000
+# Right now only microphones that support 48 kHz will work.
+# Whisper only supports 8\12\16\24\48 kHz.
+# Also, this class is used only for tests right now.
+# With that in mind, there is no need to create resampler or support other mics.
+RATE = 48_000
+BLOCK_SIZE = 1024
+
 
 class LocalAudioInputAdapter:
-    def __init__(self, domain_port: AudioInputPort, mic_name: str | None = None, speaker_name: str | None = None):
+    def __init__(self, domain_port: AudioInputPort, mic_name: str | None = None):
         self._domain_port: AudioInputPort = domain_port
-        self._speaker_name: str | None = speaker_name
         self._mic_name: str | None = mic_name
 
-        self.session_id: str | None = None
         self._output_dir: Path | None = None
-        self._stop = threading.Event()
-        self._chunks: dict[str, list[np.ndarray]] = {}
-        self._errors: list[Exception] = []
-        self._threads: list[threading.Thread] = []
+        self._chunks: list[np.ndarray] = []
+        self._stream: sd.InputStream | None = None
+        self._stop_requested = False
 
-
-    def start_recording(self):
-        self.session_id = str(uuid.uuid4())
-        self._output_dir = Path(f"{tempfile.gettempdir()}/sluchawa_records/{self.session_id}")
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._stop.clear()
-        self._chunks = { key: [] for key in TRACKS}
-        self._errors = []
-
-        sources = {
-            "mic": self._resolve_mic(),
-            "system": self._resolve_system()
-        }
-
-        self._threads = [
-            threading.Thread(
-                target=self._capture,
-                args=(sources[key], key),
-                name=f"sluchawa-{key}",
-                daemon=True,
-            ) for key in TRACKS
-        ]
-
-        for thread in self._threads:
-            thread.start()
-
-
-    def _capture(self, source, key: str):
-        try:
-            with source.recorder(samplerate=RATE) as recorder:
-                while not self._stop.is_set():
-                    self._chunks[key].append(recorder.record(numframes=1024))
-        except Exception as ex:
-            logger.error(f"{key} capture failed: {ex}")
-            self._errors.append(ex)
-
-
-    def stop_recording(self):
-        if not self._threads:
+    def start_recording(self) -> None:
+        if self._stream is not None:
+            logger.warning("Recording is already in progress")
             return
 
-        self._stop.set()
-        for thread in self._threads:
-            thread.join()
+        self._output_dir = Path(tempfile.gettempdir()) / f"sluchawa_records/{uuid.uuid4()}"
+        self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        self._threads = []
-        self.add_audio_to_queue(
-            error=self._errors[0] if self._errors else None
-        )
+        self._chunks = []
+        self._stop_requested = False
 
-    def add_file_to_queue(self, file_path: str):
+        def callback(in_data: np.ndarray, frames: int, time_info, status) -> None:
+            if not self._stop_requested:
+                self._chunks.append(in_data.copy())
+
+        try:
+            self._stream = sd.InputStream(
+                device=self._resolve_device(self._mic_name),
+                samplerate=RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=BLOCK_SIZE,
+                callback=callback,
+            )
+            self._stream.start()
+        except (sd.PortAudioError, ValueError):
+            logger.exception("Microphone capture failed")
+            self._output_dir = None
+            self._chunks = []
+            self._close_stream()
+
+    def stop_recording(self) -> None:
+        self._stop_requested = True
+        try:
+            self._close_stream()
+        finally:
+            if self._chunks and self._output_dir is not None:
+                path = self._save_track()
+                self._chunks = []
+                if path is not None:
+                    self.add_file_to_queue(path)
+
+    def _close_stream(self) -> None:
+        stream = self._stream
+        self._stream = None
+
+        if stream is None:
+            return
+
+        try:
+            stream.stop()
+        except sd.PortAudioError:
+            logger.exception("Could not stop the microphone stream")
+        finally:
+            try:
+                stream.close()
+            except sd.PortAudioError:
+                logger.exception("Could not close the microphone stream")
+
+    def _save_track(self) -> Path | None:
+        if self._output_dir is None:
+            logger.error("Cannot save a track before starting recording.")
+            return None
+
+        if not self._chunks:
+            logger.error("Cannot save a track without recorded audio")
+            return None
+
+        audio = np.concatenate(self._chunks, axis=0)
+        audio = audio.mean(axis=1) if audio.ndim >= 2 else audio
+
+        path = self._output_dir / "microphone.ogg"
+        try:
+            sf.write(
+                path,
+                audio,
+                RATE,
+                format="OGG",
+                subtype="OPUS",
+                compression_level=0.9,
+            )
+        except (OSError, RuntimeError):
+            logger.exception("Could not save recording to {}", path)
+            path.unlink(missing_ok=True)
+            return None
+
+        return path
+
+    @staticmethod
+    def _resolve_device(mic_name: str | None) -> int | None:
+        if mic_name is None:
+            return None
+
+        for index, device in enumerate(sd.query_devices()):
+            if (
+                device["max_input_channels"] > 0
+                and mic_name.lower() in device["name"].lower()
+            ):
+                return index
+
+        raise ValueError(f"Microphone not found: {mic_name}")
+
+    def add_file_to_queue(self, file_path: str | Path) -> None:
         path = Path(file_path)
 
         if not path.is_file():
-            logger.error(f"Element in path ({path}) is not a file")
+            logger.error("Element in path ({}) is not a file", path)
             return
 
-        audio = sf.info(path)
+        try:
+            audio = sf.info(path)
+        except (sf.LibsndfileError, OSError) as ex:
+            logger.error("File {} is not a valid audio file: {}", path, ex)
+            return
 
         if audio.format != "OGG":
-            logger.error(f"File {audio.name} format must be \'OGG\'")
+            logger.error("File {} format must be 'OGG'", path)
             return
 
         if audio.subtype != "OPUS":
-            logger.error(f"File {audio.name} subtype must be \'OPUS\'")
+            logger.error("File {} subtype must be 'OPUS'", path)
             return
 
-        logger.info(f"File {audio.name} is added to path")
         self._domain_port.submit_audio([path])
-
-    def add_audio_to_queue(self, error: Exception | None):
-        if error:
-            logger.error(f"There was an error while recording: {error}")
-
-        if not self._output_dir:
-            return
-
-        paths = [
-            path for key in TRACKS
-            if (path := self._save_track(key)) is not None
-        ]
-
-        if paths:
-            self._domain_port.submit_audio(paths)
-
-
-    def _save_track(self, key: str) -> Path | None:
-        chunks = self._chunks.get(key, [])
-        if not chunks or self._output_dir is None:
-            return None
-
-        audio = np.concatenate(chunks, axis=0)
-        audio = audio.mean(axis=1)
-
-        path = self._output_dir / f"{key}.ogg"
-        sf.write(
-            path,
-            audio,
-            RATE,
-            format="OGG",
-            subtype="OPUS",
-            compression_level=0.9
-        )
-        return path
-
-    def _resolve_mic(self):
-        if self._mic_name:
-            return sc.get_microphone(self._mic_name)
-        return sc.default_microphone()
-
-    def _resolve_system(self):
-        speaker = (
-            sc.get_speaker(self._speaker_name)
-            if self._speaker_name
-            else sc.default_speaker()
-        )
-        return sc.get_microphone(f"{speaker.id}.monitor", include_loopback=True)
