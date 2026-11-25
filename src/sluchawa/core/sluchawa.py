@@ -42,7 +42,7 @@ class Sluchawa:
             try:
                 self._process_session(audio_paths)
             except Exception:
-                logger.exception(f"Error while processing audio session.")
+                logger.exception("Error while processing audio session.")
             finally:
                 self._audio_queue.task_done()
 
