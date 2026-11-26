@@ -1,6 +1,10 @@
+from pathlib import Path
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 from pydantic import SecretStr
+
+SYSTEM_PROMPT = Path("config/SYSTEM_PROMPT.txt").read_text(encoding="utf-8")
 
 
 class LLMClient:
@@ -11,6 +15,7 @@ class LLMClient:
         api_key: str | None = None,
         timeout: float = 30.0,
     ):
+        self._system_prompt = SYSTEM_PROMPT
         self.llm = ChatGroq(
             model=model,
             temperature=temperature,
@@ -18,12 +23,11 @@ class LLMClient:
             timeout=timeout,
         )
 
-    def generate_note(self, prompt: str, system_prompt: str | None = None) -> str:
-        messages: list[tuple[str, str]] = []
-
-        if system_prompt:
-            messages.append(("system", system_prompt))
-        messages.append(("human", "{prompt}"))
+    def generate_note(self, prompt: str | None = None) -> str:
+        messages: list[tuple[str, str]] = [
+            ("system", self._system_prompt),
+            ("human", "{prompt}"),
+        ]
 
         chat_prompt = ChatPromptTemplate.from_messages(messages).format_messages(
             prompt=prompt
