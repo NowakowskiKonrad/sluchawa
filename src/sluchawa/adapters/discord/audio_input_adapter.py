@@ -1,3 +1,10 @@
+import uuid
+from pathlib import Path
+
+from loguru import logger
+
+import discord
+from discord.voice import VoiceClient
 from sluchawa.ports.audio_input_port import AudioInputPort
 
 """
@@ -8,9 +15,40 @@ After collecting all the audio required and getting stop command it should add p
 
 
 class DiscordAudioInputAdapter:
-    def __init__(self, domain_port: AudioInputPort):
+    def __init__(self, domain_port: AudioInputPort, voice_client: VoiceClient):
         self._domain_port = domain_port
+        self._voice_client = voice_client
+        self.session_id: str | None = None
+        self._output_dir: Path | None = None
+        self._sink: discord.sinks.OGGSink | None = None
 
-    def add_audio_to_queue(self):
-        # TODO: Implement proper appending to queue
-        self._domain_port.submit_audio([])
+    def start_recording(self) -> None:
+        self.session_id = str(uuid.uuid4())
+        self._output_dir = Path(f"/tmp/sluchawa_records/{self.session_id}")
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._sink = discord.sinks.OGGSink()
+        self._voice_client.start_recording(
+            self._sink,
+            self.add_audio_to_queue
+        )
+
+    def stop_recording(self) -> None:
+        self._voice_client.stop_recording()
+
+    def add_audio_to_queue(self, error: Exception | None) -> None:
+        if error:
+            logger.error(f"There was an error while recording: {error}")
+
+        if not self._output_dir or not self._sink:
+            return
+
+        saved_paths: list[Path] = []
+
+        for user_id, audio in self._sink.audio_data.items():
+            file_path = self._output_dir / f"{user_id}.ogg"
+            with open(file_path, "wb") as f:
+                f.write(audio.file.read())
+
+            saved_paths.append(file_path)
+
+        self._domain_port.submit_audio(saved_paths)
