@@ -9,10 +9,8 @@ from loguru import logger
 
 from sluchawa.ports.audio_input_port import AudioInputPort
 
-# Right now only microphones that support 48 kHz will work.
-# Whisper only supports 8\12\16\24\48 kHz.
-# Also, this class is used only for tests right now.
-# With that in mind, there is no need to create resampler or support other mics.
+# Only microphones that support 48 kHz will work.
+# This class is only for simple tests, so there is no need to support other mics.
 RATE = 48_000
 BLOCK_SIZE = 1024
 
@@ -32,8 +30,9 @@ class LocalAudioInputAdapter:
             logger.warning("Recording is already in progress")
             return
 
-        self._output_dir = Path(tempfile.gettempdir()) / f"sluchawa_records/{uuid.uuid4()}"
-        self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._output_dir = (
+            Path(tempfile.gettempdir()) / f"sluchawa_records/{uuid.uuid4()}"
+        )
 
         self._chunks = []
         self._stop_requested = False
@@ -52,22 +51,35 @@ class LocalAudioInputAdapter:
                 callback=callback,
             )
             self._stream.start()
-        except (sd.PortAudioError, ValueError):
-            logger.exception("Microphone capture failed")
-            self._output_dir = None
-            self._chunks = []
-            self._close_stream()
+        except ValueError as ex:
+            logger.error("Recording was not started: {}", ex)
+            self._abort_start()
+        except sd.PortAudioError as ex:
+            logger.error(
+                "Microphone capture failed (device must support {} Hz mono): {}",
+                RATE,
+                ex
+            )
+            self._abort_start()
+
+    def _abort_start(self) -> None:
+        self._output_dir = None
+        self._chunks = []
+        self._close_stream()
 
     def stop_recording(self) -> None:
-        self._stop_requested = True
         try:
             self._close_stream()
         finally:
-            if self._chunks and self._output_dir is not None:
-                path = self._save_track()
+            self._stop_requested = True
+            try:
+                if self._chunks and self._output_dir is not None:
+                    path = self._save_track()
+                    if path is not None:
+                        self.add_file_to_queue(path)
+            finally:
                 self._chunks = []
-                if path is not None:
-                    self.add_file_to_queue(path)
+                self._output_dir = None
 
     def _close_stream(self) -> None:
         stream = self._stream
@@ -100,6 +112,7 @@ class LocalAudioInputAdapter:
 
         path = self._output_dir / "microphone.ogg"
         try:
+            self._output_dir.mkdir(parents=True, exist_ok=True)
             sf.write(
                 path,
                 audio,
@@ -120,14 +133,20 @@ class LocalAudioInputAdapter:
         if mic_name is None:
             return None
 
+        input_devices: list[str] = []
+
         for index, device in enumerate(sd.query_devices()):
-            if (
-                device["max_input_channels"] > 0
-                and mic_name.lower() in device["name"].lower()
-            ):
+            if device["max_input_channels"] <= 0:
+                continue
+
+            input_devices.append(device["name"])
+            if mic_name.lower() in device["name"].lower():
                 return index
 
-        raise ValueError(f"Microphone not found: {mic_name}")
+        available = ", ".join(input_devices) or "none"
+        raise ValueError(
+            f"microphone {mic_name!r} not found (available input devices: {available})"
+        )
 
     def add_file_to_queue(self, file_path: str | Path) -> None:
         path = Path(file_path)
