@@ -27,16 +27,16 @@ class AudioDispatcher:
     def _is_audio_file_valid(self, path: Path) -> bool:
         if not path.exists() or not path.is_file():
             logger.error(f"{path} does not exist or is not a file.")
-            return None
+            return False
 
         if path.suffix.lower() != ".ogg":
             logger.error(
                 f"Error - unsupported format '{path.suffix}' (required .ogg): {path}"
             )
-            return None
+            return False
 
         if path.stat().st_size == 0:
             logger.error(f"Error - empty file: {path}")
-            return None
+            return False
 
-        return path
+        return True
