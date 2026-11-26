@@ -59,7 +59,7 @@ def test_start_recording_ignores_second_call(fake_sounddevice):
     fake_sounddevice.InputStream.assert_not_called()
 
 
-def test_stop_recording_stops_stream_and_submits_audio(tmp_path):
+def test_stop_recording_stops_stream_and_submits_audio(tmp_path, fake_sounddevice):
     # Given
     adapter = _make_adapter()
     adapter._output_dir = tmp_path
