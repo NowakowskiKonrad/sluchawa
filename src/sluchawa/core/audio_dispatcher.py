@@ -1,20 +1,14 @@
 from pathlib import Path
 import queue
-import threading
 from loguru import logger
 
 
 class AudioDispatcher:
-    def __init__(self, audio_queue: queue.Queue[Path]) -> None:
+    def __init__(self, audio_queue: queue.Queue[list[Path]]) -> None:
         self._audio_queue = audio_queue
-        self._stop_event = threading.Event()
 
     def submit_audio(self, paths: list[Path]) -> None:
-        if self._stop_event.is_set():
-            logger.warning("Audio dispatcher stopped")
-            return
-
-        valid_paths: list[Path] = []
+        valid_paths = [path for path in paths if self._is_valid(path)]
         for path in paths:
             valid_path = self._validate_audio_file(path)
             if valid_path is not None:
@@ -24,14 +18,13 @@ class AudioDispatcher:
                 logger.warning("No valid audio files in batch. Nothing dispatched")
                 return
 
-            try:
-                self._audio_queue.put_nowait(valid_paths)
-                logger.info(f"Audio dispatched {valid_path}")
-            except queue.Full:
-                logger.error(f"Queue full - maxsize={self._audio_queue.maxsize}. File {valid_path} rejected")
+        try:
+            self._audio_queue.put_nowait(valid_paths)
+            logger.info(f"Audio dispatched {path}")
+        except queue.Full:
+            logger.error(f"Queue full - maxsize={self._audio_queue.maxsize}. File {path} rejected")
 
-    def _validate_audio_file(self, path: Path) -> Path | None:
-
+    def _is_audio_file_valid(self, path: Path) -> bool:
         if not path.exists() or not path.is_file():
             logger.error(f"{path} does not exist or is not a file.")
             return None
