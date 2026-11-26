@@ -1,9 +1,19 @@
+import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from sluchawa.adapters.local.audio_input_adapter import LocalAudioInputAdapter
+
+
+@pytest.fixture
+def fake_sounddevice():
+    fake = MagicMock()
+    fake.PortAudioError = type("PortAudioError", (Exception,), {})
+    with patch.dict(sys.modules, {"sounddevice": fake}):
+        yield fake
 
 
 def _make_adapter() -> LocalAudioInputAdapter:
@@ -28,37 +38,25 @@ def test_save_track_writes_ogg_opus(tmp_path):
     assert info.frames == 1024
 
 
-def test_start_recording_starts_stream_and_returns(tmp_path):
-    # Given
+def test_start_recording_starts_stream_and_returns(fake_sounddevice):
     adapter = _make_adapter()
     stream = MagicMock()
+    fake_sounddevice.InputStream.return_value = stream
 
-    # When
-    with patch(
-        "sluchawa.adapters.local.audio_input_adapter.sd.InputStream",
-        return_value=stream,
-    ) as input_stream:
-        adapter.start_recording()
+    adapter.start_recording()
 
-    # Then
-    input_stream.assert_called_once()
+    fake_sounddevice.InputStream.assert_called_once()
     stream.start.assert_called_once()
     assert adapter._stream is stream
 
 
-def test_start_recording_ignores_second_call():
-    # Given
+def test_start_recording_ignores_second_call(fake_sounddevice):
     adapter = _make_adapter()
     adapter._stream = MagicMock()
 
-    # When
-    with patch(
-        "sluchawa.adapters.local.audio_input_adapter.sd.InputStream",
-    ) as input_stream:
-        adapter.start_recording()
+    adapter.start_recording()
 
-    # Then
-    input_stream.assert_not_called()
+    fake_sounddevice.InputStream.assert_not_called()
 
 
 def test_stop_recording_stops_stream_and_submits_audio(tmp_path):

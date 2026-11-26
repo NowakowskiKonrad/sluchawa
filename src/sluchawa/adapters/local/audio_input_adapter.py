@@ -1,11 +1,14 @@
 import tempfile
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-import sounddevice as sd
 import soundfile as sf
 from loguru import logger
+
+if TYPE_CHECKING:
+    import sounddevice as sd
 
 from sluchawa.ports.audio_input_port import AudioInputPort
 
@@ -29,6 +32,8 @@ class LocalAudioInputAdapter:
         if self._stream is not None:
             logger.warning("Recording is already in progress")
             return
+
+        import sounddevice as sd
 
         self._output_dir = (
             Path(tempfile.gettempdir()) / f"sluchawa_records/{uuid.uuid4()}"
@@ -88,6 +93,8 @@ class LocalAudioInputAdapter:
         if stream is None:
             return
 
+        import sounddevice as sd
+
         try:
             stream.stop()
         except sd.PortAudioError:
@@ -132,6 +139,8 @@ class LocalAudioInputAdapter:
     def _resolve_device(mic_name: str | None) -> int | None:
         if mic_name is None:
             return None
+
+        import sounddevice as sd
 
         input_devices: list[str] = []
 
