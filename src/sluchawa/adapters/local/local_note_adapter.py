@@ -8,7 +8,7 @@ TEMP_PATH = Path(tempfile.gettempdir()) / "sluchawa_notes"
 
 
 class LocalNoteAdapter:
-    def __init__(self, output_dir: Path | str = Path("./notes")):
+    def __init__(self, output_dir: Path | str = Path("../sluchawa_notes")):
         self._output_dir: Path = Path(output_dir)
 
     def send(self, message: str) -> None:
