@@ -1,5 +1,4 @@
-import tempfile
-import uuid
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,7 +11,7 @@ if TYPE_CHECKING:
 
 from sluchawa.ports.audio_input_port import AudioInputPort
 
-# Only microphones that support 48 kHz will work.
+# Only microphones that support 48 kHz will work because of opus.
 # This class is only for simple tests, so there is no need to support other mics.
 RATE = 48_000
 BLOCK_SIZE = 1024
@@ -35,14 +34,14 @@ class LocalAudioInputAdapter:
 
         import sounddevice as sd
 
-        self._output_dir = (
-            Path(tempfile.gettempdir()) / f"sluchawa_records/{uuid.uuid4()}"
-        )
+        self._output_dir = Path("../sluchawa_recordings")
 
         self._chunks = []
         self._stop_requested = False
 
         def callback(in_data: np.ndarray, frames: int, time_info, status) -> None:
+            if status:
+                logger.warning("Audio input status: {}", status)
             if not self._stop_requested:
                 self._chunks.append(in_data.copy())
 
@@ -63,20 +62,15 @@ class LocalAudioInputAdapter:
             logger.error(
                 "Microphone capture failed (device must support {} Hz mono): {}",
                 RATE,
-                ex
+                ex,
             )
             self._abort_start()
 
-    def _abort_start(self) -> None:
-        self._output_dir = None
-        self._chunks = []
-        self._close_stream()
-
     def stop_recording(self) -> None:
+        self._stop_requested = True
         try:
             self._close_stream()
         finally:
-            self._stop_requested = True
             try:
                 if self._chunks and self._output_dir is not None:
                     path = self._save_track()
@@ -85,6 +79,38 @@ class LocalAudioInputAdapter:
             finally:
                 self._chunks = []
                 self._output_dir = None
+
+    def add_file_to_queue(self, file_path: str | Path) -> None:
+        """
+        Validate an audio file and submit it to the domain port.
+
+        The file must exist and be OGG/OPUS encoded.
+        Invalid paths or formats are logged.
+
+        Args:
+            file_path: Path to the audio file to enqueue.
+        """
+        path = Path(file_path)
+
+        if not path.is_file():
+            logger.error("Element in path ({}) is not a file", path)
+            return
+
+        try:
+            audio = sf.info(path)
+        except (sf.LibsndfileError, OSError) as ex:
+            logger.error("File {} is not a valid audio file: {}", path, ex)
+            return
+
+        if audio.format != "OGG":
+            logger.error("File {} format must be 'OGG'", path)
+            return
+
+        if audio.subtype != "OPUS":
+            logger.error("File {} subtype must be 'OPUS'", path)
+            return
+
+        self._domain_port.submit_audio([path])
 
     def _close_stream(self) -> None:
         stream = self._stream
@@ -115,9 +141,11 @@ class LocalAudioInputAdapter:
             return None
 
         audio = np.concatenate(self._chunks, axis=0)
-        audio = audio.mean(axis=1) if audio.ndim >= 2 else audio
+        audio = audio.mean(axis=1, dtype=np.float32) if audio.ndim >= 2 else audio
 
-        path = self._output_dir / "microphone.ogg"
+        path = self._output_dir / time.strftime(
+            "%Y-%m-%d_%H-%M-%S_mic.ogg", time.localtime()
+        )
         try:
             self._output_dir.mkdir(parents=True, exist_ok=True)
             sf.write(
@@ -134,6 +162,11 @@ class LocalAudioInputAdapter:
             return None
 
         return path
+
+    def _abort_start(self) -> None:
+        self._output_dir = None
+        self._chunks = []
+        self._close_stream()
 
     @staticmethod
     def _resolve_device(mic_name: str | None) -> int | None:
@@ -156,26 +189,3 @@ class LocalAudioInputAdapter:
         raise ValueError(
             f"microphone {mic_name!r} not found (available input devices: {available})"
         )
-
-    def add_file_to_queue(self, file_path: str | Path) -> None:
-        path = Path(file_path)
-
-        if not path.is_file():
-            logger.error("Element in path ({}) is not a file", path)
-            return
-
-        try:
-            audio = sf.info(path)
-        except (sf.LibsndfileError, OSError) as ex:
-            logger.error("File {} is not a valid audio file: {}", path, ex)
-            return
-
-        if audio.format != "OGG":
-            logger.error("File {} format must be 'OGG'", path)
-            return
-
-        if audio.subtype != "OPUS":
-            logger.error("File {} subtype must be 'OPUS'", path)
-            return
-
-        self._domain_port.submit_audio([path])
