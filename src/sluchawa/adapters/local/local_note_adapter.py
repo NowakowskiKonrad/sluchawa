@@ -5,10 +5,10 @@ from pathlib import Path
 from loguru import logger
 
 TEMP_PATH = Path(tempfile.gettempdir()) / "sluchawa_notes"
-
+DEFAULT_OUTPUT_DIR = Path.cwd() / "sluchawa_notes"
 
 class LocalNoteAdapter:
-    def __init__(self, output_dir: Path | str = (Path.cwd() / "sluchawa_notes")):
+    def __init__(self, output_dir: Path | str = DEFAULT_OUTPUT_DIR):
         self._output_dir: Path = Path(output_dir)
 
     def send(self, message: str) -> None:
