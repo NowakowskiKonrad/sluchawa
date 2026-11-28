@@ -140,13 +140,11 @@ class LocalAudioInputAdapter:
             logger.error("Cannot save a track without recorded audio")
             return None
 
-        audio = np.concatenate(self._chunks, axis=0)
-        audio = audio.mean(axis=1, dtype=np.float32) if audio.ndim >= 2 else audio
-
-        path = self._output_dir / time.strftime(
-            "%Y-%m-%d_%H-%M-%S_mic.ogg", time.localtime()
-        )
+        path = self._output_dir / time.strftime("%Y-%m-%d_%H-%M-%S_mic.ogg")
         try:
+            audio = np.concatenate(self._chunks, axis=0)
+            audio = audio.mean(axis=1, dtype=np.float32) if audio.ndim >= 2 else audio
+
             self._output_dir.mkdir(parents=True, exist_ok=True)
             sf.write(
                 path,
@@ -156,9 +154,12 @@ class LocalAudioInputAdapter:
                 subtype="OPUS",
                 compression_level=0.9,
             )
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             logger.exception("Could not save recording to {}", path)
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Could not remove {}", path)
             return None
 
         return path
@@ -170,7 +171,7 @@ class LocalAudioInputAdapter:
 
     @staticmethod
     def _resolve_device(mic_name: str | None) -> int | None:
-        if mic_name is None:
+        if not mic_name:
             return None
 
         import sounddevice as sd

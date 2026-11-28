@@ -81,7 +81,7 @@ def test_stop_recording_stops_stream_and_submits_audio(tmp_path, fake_sounddevic
     assert submitted_paths[0].suffix == ".ogg"
 
 
-def test_stop_recording_without_audio_does_not_submit(tmp_path):
+def test_stop_recording_without_audio_does_not_submit(tmp_path, fake_sounddevice):
     # Given
     adapter = _make_adapter()
     adapter._output_dir = tmp_path
