@@ -231,3 +231,6 @@ wheels/
 .venv
 
 .idea/
+
+# Local test notes
+sluchawa_notes/
