@@ -34,7 +34,7 @@ class LocalAudioInputAdapter:
 
         import sounddevice as sd
 
-        self._output_dir = Path("../sluchawa_recordings")
+        self._output_dir = Path.cwd() / "sluchawa_recordings"
 
         self._chunks = []
         self._stop_requested = False
