@@ -8,7 +8,7 @@ TEMP_PATH = Path(tempfile.gettempdir()) / "sluchawa_notes"
 
 
 class LocalNoteAdapter:
-    def __init__(self, output_dir: Path | str = Path("../sluchawa_notes")):
+    def __init__(self, output_dir: Path | str = (Path.cwd() / "sluchawa_notes")):
         self._output_dir: Path = Path(output_dir)
 
     def send(self, message: str) -> None:
@@ -17,7 +17,7 @@ class LocalNoteAdapter:
         if output_dir is None:
             return
 
-        file_name = time.strftime("%Y-%m-%d_%H-%M-%S_note.md", time.localtime())
+        file_name = time.strftime("%Y-%m-%d_%H-%M-%S_note.md")
 
         try:
             (output_dir / file_name).write_text(message, encoding="utf-8")
